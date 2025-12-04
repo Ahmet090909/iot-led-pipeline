@@ -25,7 +25,7 @@ jobs:
         run: docker run --name pi-cont pi-builder
 
       - name: Copy executable out of container
-        run: docker cp pi-cont:/work/main ./main
+        run: docker cp pi-cont:/work1/main ./main
 
       - name: Show file
         run: ls -l ./main
