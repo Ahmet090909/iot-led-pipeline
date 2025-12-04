@@ -1,0 +1,25 @@
+name: Build Docker and Compile C Code
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Build docker container
+        run: docker build -t pi-builder .
+
+      - name: Run container
+        run: docker run --name pi-cont pi-builder
+
+      - name: Copy executable out of container
+        run: docker cp pi-cont:/work/main ./main
+
+      - name: Show file
+        run: ls -l ./main
