@@ -1,13 +1,4 @@
-FROM arm32v7/debian:latest
-
-RUN apt-get update && apt-get install -y \
-    gcc \
-    make \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /work
-
-COPY . .
-
-RUN gcc main.c -o main
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata
+RUN apt-get install -y vim build-essential git cmake net-tools gdb clang
+WORKDIR /work1
