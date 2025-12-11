@@ -11,11 +11,12 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work1
-
 COPY . .
 
-# Gebruik pkg-config om de juiste flags te krijgen (veiligste optie)
-RUN gcc main.c -o main $(pkg-config --cflags --libs pigpio)
+# Zorg dat output altijd op /app/mybinary komt
+RUN mkdir -p /app && \
+    gcc main.c -o /app/mybinary $(pkg-config --cflags --libs pigpio)
 
-# Debug: show what files exist after compiling
-RUN ls -R /work1
+# Debug: list files (optioneel, kan verwijderd worden later)
+RUN ls -la /work1 || true
+RUN ls -la /app || true

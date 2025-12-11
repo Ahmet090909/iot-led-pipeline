@@ -6,12 +6,11 @@ on:
   workflow_dispatch:
 
 env:
-  # Pas deze paden aan indien nodig
-  IMAGE_TAG: deploy-temp:latest
+  IMAGE_TAG: fast090909/iot-led-pipeline:${{ github.sha }}
   CONTAINER_NAME: build-temp-container
-  BINARY_NAME: mybinary           # naam van executable die je uit de image wilt halen
-  BINARY_PATH_IN_IMAGE: /app/mybinary  # pad binnen image waar de binary staat
-  REMOTE_DEST_PATH: /home/${{ secrets.PI_USER }}/mybinary  # waar op de Pi het bestand terecht moet komen
+  BINARY_NAME: mybinary
+  BINARY_PATH_IN_IMAGE: /app/mybinary
+  REMOTE_DEST_PATH: /home/${{ secrets.PI_USER }}/mybinary
   TMUX_SESSION: app-session
 
 jobs:
@@ -28,40 +27,42 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Build ARM image and load into runner
+      - name: Build ARM image and load into runner (single-platform)
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           load: true
           platforms: linux/arm64
+          tags: ${{ env.IMAGE_TAG }}
 
       - name: Create container from image
         run: |
-          # create container from the built image; use tag if you produce one
-          docker create --name ${{ env.CONTAINER_NAME }} ${{ env.IMAGE_TAG }} || docker create --name ${{ env.CONTAINER_NAME }} $(docker images -q | head -n1)
+          docker create --name "${{ env.CONTAINER_NAME }}" "${{ env.IMAGE_TAG }}" || docker create --name "${{ env.CONTAINER_NAME }}" $(docker images -q | head -n1)
 
       - name: Copy executable out of container
         run: |
-          docker cp ${CONTAINER_NAME}:${BINARY_PATH_IN_IMAGE} ./${BINARY_NAME}
-          chmod +x ./${BINARY_NAME}
-          ls -la ./${BINARY_NAME}
+          docker cp "${{ env.CONTAINER_NAME }}:${{ env.BINARY_PATH_IN_IMAGE }}" ./${{ env.BINARY_NAME }}
+          chmod +x ./${{ env.BINARY_NAME }}
+          ls -la ./${{ env.BINARY_NAME }}
 
       - name: Remove temporary container
         if: always()
-        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+        run: docker rm -f "${{ env.CONTAINER_NAME }}" || true
 
-      - name: Prepare SSH key
+      - name: Prepare SSH private key
         run: |
-          echo "$PI_KEY" > private_key
+          echo "${{ secrets.PI_SSH_PRIVATE_KEY }}" > private_key
           chmod 600 private_key
-        env:
-          PI_KEY: ${{ secrets.PI_SSH_PRIVATE_KEY }}
 
-      - name: Add Pi host to known_hosts (prevent interactive prompt)
+      - name: Add Pi host to known_hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.PI_SSH_PORT }}" -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || ssh-keyscan -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts
+          if [ -n "${{ secrets.PI_SSH_PORT }}" ]; then
+            ssh-keyscan -p "${{ secrets.PI_SSH_PORT }}" -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || true
+          else
+            ssh-keyscan -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || true
+          fi
           chmod 644 ~/.ssh/known_hosts
 
       - name: Copy binary to Raspberry Pi
@@ -72,7 +73,6 @@ jobs:
       - name: Restart binary on Raspberry Pi inside tmux
         run: |
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
-          # Stop previous tmux session (ignore errors) and start a new detached session running the executable
           ssh -p "$PORT" -i private_key -o StrictHostKeyChecking=yes ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
             "tmux kill-session -t ${{ env.TMUX_SESSION }} || true && \
              mv ${REMOTE_DEST_PATH} ${REMOTE_DEST_PATH}.bak || true && \
