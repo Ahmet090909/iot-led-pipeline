@@ -1,8 +1,9 @@
-name: Build Docker and Compile C Code
+name: CI - build container and extract binary
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  pull_request:
 
 jobs:
   build:
@@ -10,22 +11,42 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Enable QEMU for ARM
+      - name: Set up QEMU (for cross-platform)
         uses: docker/setup-qemu-action@v2
+        with:
+          platforms: all
 
-      - name: Setup Docker Buildx
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Build docker container
-        run: docker build -t pi-builder .
+      - name: Login to Docker registry (optional, only if you push)
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Run container
-        run: docker run --name pi-cont pi-builder
+      - name: Build docker container (with plain progress)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/amd64,linux/arm64
+          progress: plain
+
+      - name: Create container from image
+        run: |
+          IMAGE_ID=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
+          echo "Using image $IMAGE_ID"
+          docker create --name tmp-container "$IMAGE_ID" || docker create --name tmp-container $(docker images -q | head -n1)
 
       - name: Copy executable out of container
-        run: docker cp pi-cont:/work1/main ./main
+        run: |
+          # Pas dit pad aan naar de locatie van jouw binary in de image, bijvoorbeeld /app/mybinary
+          docker cp tmp-container:/path/in/container/mybinary ./mybinary || true
+          ls -la ./mybinary || true
 
-      - name: Show file
-        run: ls -l ./main
+      - name: Remove temporary container
+        run: docker rm tmp-container || true
