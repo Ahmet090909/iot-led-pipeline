@@ -2,7 +2,7 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Installeer build tools + git om pigpio uit bron te bouwen
+# Basis build tools + git om pigpio uit bron te bouwen
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# Clone en build pigpio (werkt voor arm64 via QEMU)
+# Clone en build pigpio (compile op arm64 via QEMU)
 RUN git clone https://github.com/joan2937/pigpio.git /tmp/pigpio && \
     cd /tmp/pigpio && \
     make && \
@@ -33,5 +33,5 @@ COPY . .
 RUN mkdir -p /app && \
     gcc main.c -o /app/mybinary $(pkg-config --cflags --libs pigpio) || (echo "gcc failed" && ls -la /work1 && exit 1)
 
-# Debug output (optioneel)
+# Debug: laat bestand zien (kan je weghalen later)
 RUN ls -la /app || true

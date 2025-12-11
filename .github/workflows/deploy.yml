@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  # image tag uses commit sha so every run is unique (prevents stale cache)
   IMAGE_TAG: fast090909/iot-led-pipeline:${{ github.sha }}
   CONTAINER_NAME: build-temp-container
   BINARY_NAME: mybinary
@@ -27,23 +28,35 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Build ARM image and load into runner (single-platform)
+      - name: Build ARM image and load into runner (single-platform, no-cache)
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           load: true
+          no-cache: true
           platforms: linux/arm64
           tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            CACHEBUST=${{ github.run_id }}
 
       - name: Create container from image
         run: |
-          docker create --name "${{ env.CONTAINER_NAME }}" "${{ env.IMAGE_TAG }}" || docker create --name "${{ env.CONTAINER_NAME }}" $(docker images -q | head -n1)
+          # create container from the built image (use explicit tag)
+          if ! docker image inspect "${{ env.IMAGE_TAG }}" >/dev/null 2>&1; then
+            # fallback: pick the most recent image id if tag not present
+            IMG=$(docker images -q | head -n1)
+            docker create --name "${{ env.CONTAINER_NAME }}" "$IMG"
+          else
+            docker create --name "${{ env.CONTAINER_NAME }}" "${{ env.IMAGE_TAG }}"
+          fi
 
       - name: Copy executable out of container
         run: |
+          set -e
           docker cp "${{ env.CONTAINER_NAME }}:${{ env.BINARY_PATH_IN_IMAGE }}" ./${{ env.BINARY_NAME }}
           chmod +x ./${{ env.BINARY_NAME }}
+          echo "Copied binary:"
           ls -la ./${{ env.BINARY_NAME }}
 
       - name: Remove temporary container
@@ -73,8 +86,9 @@ jobs:
       - name: Restart binary on Raspberry Pi inside tmux
         run: |
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
+          # Expand local vars (REMOTE_DEST_PATH, TMUX_SESSION) locally and run the commands on remote.
           ssh -p "$PORT" -i private_key -o StrictHostKeyChecking=yes ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
-            "tmux kill-session -t ${{ env.TMUX_SESSION }} || true && \
-             mv ${REMOTE_DEST_PATH} ${REMOTE_DEST_PATH}.bak || true && \
-             chmod +x ${REMOTE_DEST_PATH} || true && \
-             tmux new -d -s ${{ env.TMUX_SESSION }} '${REMOTE_DEST_PATH}'"
+            "tmux kill-session -t '${{ env.TMUX_SESSION }}' || true && \
+             mv '${{ env.REMOTE_DEST_PATH }}' '${{ env.REMOTE_DEST_PATH }}.bak' || true && \
+             chmod +x '${{ env.REMOTE_DEST_PATH }}' || true && \
+             tmux new -d -s '${{ env.TMUX_SESSION }}' '${{ env.REMOTE_DEST_PATH }}'"
