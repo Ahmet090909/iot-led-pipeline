@@ -1,52 +1,80 @@
-name: CI - build container and extract binary
+name: Build, extract binary and deploy to Raspberry Pi
 
 on:
   push:
     branches: [ main ]
-  pull_request:
+  workflow_dispatch:
+
+env:
+  # Pas deze paden aan indien nodig
+  IMAGE_TAG: deploy-temp:latest
+  CONTAINER_NAME: build-temp-container
+  BINARY_NAME: mybinary           # naam van executable die je uit de image wilt halen
+  BINARY_PATH_IN_IMAGE: /app/mybinary  # pad binnen image waar de binary staat
+  REMOTE_DEST_PATH: /home/${{ secrets.PI_USER }}/mybinary  # waar op de Pi het bestand terecht moet komen
+  TMUX_SESSION: app-session
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for cross-platform)
+      - name: Set up QEMU (for emulation)
         uses: docker/setup-qemu-action@v2
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to Docker registry (optional, only if you push)
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build docker container (with plain progress)
+      - name: Build ARM image and load into runner
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           load: true
-          platforms: linux/amd64,linux/arm64
-          progress: plain
+          platforms: linux/arm64
 
       - name: Create container from image
         run: |
-          IMAGE_ID=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
-          echo "Using image $IMAGE_ID"
-          docker create --name tmp-container "$IMAGE_ID" || docker create --name tmp-container $(docker images -q | head -n1)
+          # create container from the built image; use tag if you produce one
+          docker create --name ${{ env.CONTAINER_NAME }} ${{ env.IMAGE_TAG }} || docker create --name ${{ env.CONTAINER_NAME }} $(docker images -q | head -n1)
 
       - name: Copy executable out of container
         run: |
-          # Pas dit pad aan naar de locatie van jouw binary in de image, bijvoorbeeld /app/mybinary
-          docker cp tmp-container:/path/in/container/mybinary ./mybinary || true
-          ls -la ./mybinary || true
+          docker cp ${CONTAINER_NAME}:${BINARY_PATH_IN_IMAGE} ./${BINARY_NAME}
+          chmod +x ./${BINARY_NAME}
+          ls -la ./${BINARY_NAME}
 
       - name: Remove temporary container
-        run: docker rm tmp-container || true
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+      - name: Prepare SSH key
+        run: |
+          echo "$PI_KEY" > private_key
+          chmod 600 private_key
+        env:
+          PI_KEY: ${{ secrets.PI_SSH_PRIVATE_KEY }}
+
+      - name: Add Pi host to known_hosts (prevent interactive prompt)
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.PI_SSH_PORT }}" -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || ssh-keyscan -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Copy binary to Raspberry Pi
+        run: |
+          PORT=${{ secrets.PI_SSH_PORT || '22' }}
+          scp -P "$PORT" -i private_key -o StrictHostKeyChecking=yes ./${{ env.BINARY_NAME }} ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}
+
+      - name: Restart binary on Raspberry Pi inside tmux
+        run: |
+          PORT=${{ secrets.PI_SSH_PORT || '22' }}
+          # Stop previous tmux session (ignore errors) and start a new detached session running the executable
+          ssh -p "$PORT" -i private_key -o StrictHostKeyChecking=yes ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
+            "tmux kill-session -t ${{ env.TMUX_SESSION }} || true && \
+             mv ${REMOTE_DEST_PATH} ${REMOTE_DEST_PATH}.bak || true && \
+             chmod +x ${REMOTE_DEST_PATH} || true && \
+             tmux new -d -s ${{ env.TMUX_SESSION }} '${REMOTE_DEST_PATH}'"
