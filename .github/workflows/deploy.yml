@@ -88,8 +88,6 @@ jobs:
       -o StrictHostKeyChecking=yes \
       ./${{ env.BINARY_NAME }} \
       ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}
-
-
       - name: Restart binary on Raspberry Pi inside tmux
         run: |
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
