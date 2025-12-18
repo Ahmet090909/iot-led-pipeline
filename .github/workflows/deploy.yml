@@ -6,8 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  # image tag uses commit sha so every run is unique (prevents stale cache)
-  IMAGE_TAG: fast090909/iot-led-pipeline:${{ github.sha }}
+  IMAGE_TAG: ahmet090909/iot-led-pipeline:${{ github.sha }}
   CONTAINER_NAME: build-temp-container
   BINARY_NAME: mybinary
   BINARY_PATH_IN_IMAGE: /app/mybinary
@@ -42,9 +41,7 @@ jobs:
 
       - name: Create container from image
         run: |
-          # create container from the built image (use explicit tag)
           if ! docker image inspect "${{ env.IMAGE_TAG }}" >/dev/null 2>&1; then
-            # fallback: pick the most recent image id if tag not present
             IMG=$(docker images -q | head -n1)
             docker create --name "${{ env.CONTAINER_NAME }}" "$IMG"
           else
@@ -56,7 +53,6 @@ jobs:
           set -e
           docker cp "${{ env.CONTAINER_NAME }}:${{ env.BINARY_PATH_IN_IMAGE }}" ./${{ env.BINARY_NAME }}
           chmod +x ./${{ env.BINARY_NAME }}
-          echo "Copied binary:"
           ls -la ./${{ env.BINARY_NAME }}
 
       - name: Remove temporary container
@@ -65,8 +61,23 @@ jobs:
 
       - name: Prepare SSH private key
         run: |
-          echo "${{ secrets.PI_SSH_PRIVATE_KEY }}" > private_key
+          # write private key from secret reliably (preserves newlines)
+          printf '%s\n' "${{ secrets.PI_SSH_PRIVATE_KEY }}" > private_key
           chmod 600 private_key
+
+      - name: Debug network reachability to PI (prints info)
+        run: |
+          echo "Runner hostname: $(hostname)"
+          echo "Runner public IP (if any):"; curl -s ifconfig.me || true
+          echo "Resolving PI_HOST: ${{ secrets.PI_HOST }}"
+          nslookup "${{ secrets.PI_HOST }}" || true
+          echo "Ping (4) to PI_HOST:"
+          ping -c 4 "${{ secrets.PI_HOST }}" || true
+          PORT=${{ secrets.PI_SSH_PORT || '22' }}
+          echo "TCP test to PI_HOST:$PORT with nc (if available):"
+          which nc >/dev/null 2>&1 && nc -vz -w 5 "${{ secrets.PI_HOST }}" "$PORT" || echo "nc not available or connect failed"
+          echo "SSH quick attempt (10s timeout):"
+          ssh -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i private_key -p "$PORT" "${{ secrets.PI_USER }}"@"${{ secrets.PI_HOST }}" "echo CONNECTED" || true
 
       - name: Add Pi host to known_hosts
         run: |
@@ -78,17 +89,31 @@ jobs:
           fi
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Copy binary to Raspberry Pi
+      - name: Copy binary to Raspberry Pi (with retries & timeout)
         run: |
+          set -euo pipefail
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
-          scp -P "$PORT" -i private_key -o StrictHostKeyChecking=yes ./${{ env.BINARY_NAME }} ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}
+          DEST="${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}"
+          attempt=1
+          until [ $attempt -gt 3 ]; do
+            echo "scp try #$attempt..."
+            scp -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -P "$PORT" -i private_key ./${{ env.BINARY_NAME }} "$DEST" && break
+            attempt=$((attempt+1))
+            echo "scp failed, retrying in 5s..."
+            sleep 5
+          done
+          if [ $attempt -gt 3 ]; then
+            echo "scp failed after 3 attempts"
+            exit 1
+          fi
 
       - name: Restart binary on Raspberry Pi inside tmux
         run: |
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
-          # Expand local vars (REMOTE_DEST_PATH, TMUX_SESSION) locally and run the commands on remote.
-          ssh -p "$PORT" -i private_key -o StrictHostKeyChecking=yes ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
-            "tmux kill-session -t '${{ env.TMUX_SESSION }}' || true && \
-             mv '${{ env.REMOTE_DEST_PATH }}' '${{ env.REMOTE_DEST_PATH }}.bak' || true && \
-             chmod +x '${{ env.REMOTE_DEST_PATH }}' || true && \
+          SSH_OPTS="-o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -i private_key"
+          ssh $SSH_OPTS -p "$PORT" "${{ secrets.PI_USER }}"@"${{ secrets.PI_HOST }}" \
+            "set -e; \
+             tmux kill-session -t '${{ env.TMUX_SESSION }}' || true; \
+             if [ -f '${{ env.REMOTE_DEST_PATH }}' ]; then mv '${{ env.REMOTE_DEST_PATH }}' '${{ env.REMOTE_DEST_PATH }}.bak'; fi; \
+             chmod +x '${{ env.REMOTE_DEST_PATH }}' || true; \
              tmux new -d -s '${{ env.TMUX_SESSION }}' '${{ env.REMOTE_DEST_PATH }}'"
