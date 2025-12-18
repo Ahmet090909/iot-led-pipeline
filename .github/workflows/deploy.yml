@@ -1,59 +1,94 @@
-name: Build & Deploy to Raspberry Pi
+name: Build, extract binary and deploy to Raspberry Pi
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # image tag uses commit sha so every run is unique (prevents stale cache)
+  IMAGE_TAG: fast090909/iot-led-pipeline:${{ github.sha }}
+  CONTAINER_NAME: build-temp-container
+  BINARY_NAME: mybinary
+  BINARY_PATH_IN_IMAGE: /app/mybinary
+  REMOTE_DEST_PATH: /home/${{ secrets.PI_USER }}/mybinary
+  TMUX_SESSION: app-session
 
 jobs:
-  build-deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    # 1️⃣ Checkout code
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    # 2️⃣ Start Tailscale (GitHub → Pi netwerk)
-    - name: Setup Tailscale
-      uses: tailscale/github-action@v2
-      with:
-        authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+      - name: Set up QEMU (for emulation)
+        uses: docker/setup-qemu-action@v2
 
-    # 3️⃣ Build in Docker (zelfde env als Pi)
-    - name: Build Docker image
-      run: |
-        docker build -t pi-build .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-    # 4️⃣ Compile + extract executable
-    - name: Compile and extract binary
-      run: |
-        docker create --name build_container pi-build
-        docker cp build_container:/app/led_app ./led_app
-        docker rm build_container
-        chmod +x led_app
+      - name: Build ARM image and load into runner (single-platform, no-cache)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          no-cache: true
+          platforms: linux/arm64
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            CACHEBUST=${{ github.run_id }}
 
-    # 5️⃣ SSH key installeren
-    - name: Setup SSH
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.PI_SSH_KEY }}" > ~/.ssh/id_ed25519
-        chmod 600 ~/.ssh/id_ed25519
-        ssh-keyscan ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
+      - name: Create container from image
+        run: |
+          # create container from the built image (use explicit tag)
+          if ! docker image inspect "${{ env.IMAGE_TAG }}" >/dev/null 2>&1; then
+            # fallback: pick the most recent image id if tag not present
+            IMG=$(docker images -q | head -n1)
+            docker create --name "${{ env.CONTAINER_NAME }}" "$IMG"
+          else
+            docker create --name "${{ env.CONTAINER_NAME }}" "${{ env.IMAGE_TAG }}"
+          fi
 
-    # 6️⃣ Kopieer executable naar Pi
-    - name: Copy binary to Raspberry Pi
-      run: |
-        scp led_app \
-          ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ secrets.PI_APP_DIR }}/led_app.new
+      - name: Copy executable out of container
+        run: |
+          set -e
+          docker cp "${{ env.CONTAINER_NAME }}:${{ env.BINARY_PATH_IN_IMAGE }}" ./${{ env.BINARY_NAME }}
+          chmod +x ./${{ env.BINARY_NAME }}
+          echo "Copied binary:"
+          ls -la ./${{ env.BINARY_NAME }}
 
-    # 7️⃣ Stop oude app & start nieuwe (tmux)
-    - name: Restart app on Raspberry Pi
-      run: |
-        ssh ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} << 'EOF'
-        mkdir -p ~/iot
-        pkill -f led_app || true
-        mv ~/iot/led_app.new ~/iot/led_app
-        chmod +x ~/iot/led_app
-        tmux kill-session -t led_app || true
-        tmux new-session -d -s led_app "~/iot/led_app"
-        EOF
+      - name: Remove temporary container
+        if: always()
+        run: docker rm -f "${{ env.CONTAINER_NAME }}" || true
+
+      - name: Prepare SSH private key
+        run: |
+          echo "${{ secrets.PI_SSH_PRIVATE_KEY }}" > private_key
+          chmod 600 private_key
+
+      - name: Add Pi host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          if [ -n "${{ secrets.PI_SSH_PORT }}" ]; then
+            ssh-keyscan -p "${{ secrets.PI_SSH_PORT }}" -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || true
+          else
+            ssh-keyscan -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || true
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Copy binary to Raspberry Pi
+        run: |
+         s PORT=${{ ecrets.PI_SSH_PORT || '22' }}
+          scp -P "$PORT" -i private_key -o StrictHostKeyChecking=yes ./${{ env.BINARY_NAME }} ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}
+
+      - name: Restart binary on Raspberry Pi inside tmux
+        run: |
+          PORT=${{ secrets.PI_SSH_PORT || '22' }}
+          # Expand local vars (REMOTE_DEST_PATH, TMUX_SESSION) locally and run the commands on remote.
+          ssh -p "$PORT" -i private_key -o StrictHostKeyChecking=yes ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }} \
+            "tmux kill-session -t '${{ env.TMUX_SESSION }}' || true && \
+             mv '${{ env.REMOTE_DEST_PATH }}' '${{ env.REMOTE_DEST_PATH }}.bak' || true && \
+             chmod +x '${{ env.REMOTE_DEST_PATH }}' || true && \
+             tmux new -d -s '${{ env.TMUX_SESSION }}' '${{ env.REMOTE_DEST_PATH }}'"
