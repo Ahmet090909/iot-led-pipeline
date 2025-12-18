@@ -77,12 +77,41 @@ jobs:
             ssh-keyscan -H "${{ secrets.PI_HOST }}" >> ~/.ssh/known_hosts || true
           fi
           chmod 644 ~/.ssh/known_hosts
+- name: Copy binary to Raspberry Pi (with debug & retries)
+  run: |
+    set -euo pipefail
 
-      - name: Copy binary to Raspberry Pi
-        run: |
-         PORT=${{ secrets.PI_SSH_PORT || '22' }}
-          scp -P "$PORT" -i private_key -o StrictHostKeyChecking=yes ./${{ env.BINARY_NAME }} ${{ secrets.PI_USER }}@${{ secrets.PI_HOST }}:${{ env.REMOTE_DEST_PATH }}
+    # debug: check file exists locally
+    echo "Working dir: $(pwd)"
+    echo "Expect binary: ./${{ env.BINARY_NAME }}"
+    ls -la ./${{ env.BINARY_NAME }} || { echo "Binary not found!"; exit 1; }
 
+    # build destination
+    PORT="${{ secrets.PI_SSH_PORT || '22' }}"
+    DEST_USER="${{ secrets.PI_USER }}"
+    DEST_HOST="${{ secrets.PI_HOST }}"
+    echo "PI_USER: $DEST_USER"
+    echo "PI_HOST: $DEST_HOST"
+    if [ -z "$DEST_USER" ] || [ -z "$DEST_HOST" ]; then
+      echo "ERROR: PI_USER or PI_HOST secret is empty; please set repository secrets."
+      exit 1
+    fi
+    DEST="${DEST_USER}@${DEST_HOST}:${{ env.REMOTE_DEST_PATH }}"
+    echo "Destination: $DEST"
+
+    # attempt scp with retries
+    attempt=1
+    until [ $attempt -gt 3 ]; do
+      echo "scp try #$attempt..."
+      scp -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -P "$PORT" -i private_key ./${{ env.BINARY_NAME }} "$DEST" && break
+      attempt=$((attempt+1))
+      echo "scp failed, retrying in 5s..."
+      sleep 5
+    done
+    if [ $attempt -gt 3 ]; then
+      echo "scp failed after 3 attempts"
+      exit 1
+    fi
       - name: Restart binary on Raspberry Pi inside tmux
         run: |
           PORT=${{ secrets.PI_SSH_PORT || '22' }}
