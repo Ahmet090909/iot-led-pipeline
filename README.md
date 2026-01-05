@@ -1,76 +1,63 @@
-# pigpio
+# IoT LED Pipeline – Verkeerslichtkruispunt (Raspberry Pi)
 
-pigpio is a C library for the Raspberry which allows control of the
-General Purpose Input Outputs (GPIO).
+## Projectbeschrijving
+Dit project is ontwikkeld binnen het vak **IoT Technologie** en focust op het opzetten van een **betrouwbare ontwikkel- en build-pipeline** voor embedded software op de Raspberry Pi.
 
-## Features
+Als demonstratieproject werd een **verkeerslichtkruispunt** gerealiseerd met GPIO-aangestuurde LEDs, inclusief een **night mode** die via een drukknop geactiveerd kan worden.  
+De nadruk ligt niet alleen op de functionaliteit, maar vooral op **structuur, pipeline, versiebeheer en uitbreidbaarheid**.
 
-* Sampling and time-stamping of GPIO 0-31 between 100,000 and 1,000,000 times per second
-* Provision of PWM on any number of the user GPIO simultaneously
-* Provision of servo pulses on any number of the user GPIO simultaneously
-* Callbacks when any of GPIO 0-31 change state (callbacks receive the time of the event
-  accurate to a few microseconds)
-* Notifications via pipe when any of GPIO 0-31 change state
-* Callbacks at timed intervals
-* Reading/writing all of the GPIO in a bank (0-31, 32-53) as a single operation
-* Individually setting GPIO modes, reading and writing
-* Socket and pipe interfaces for the bulk of the functionality in addition to the
-  underlying C library calls
-* Construction of arbitrary waveforms to give precise timing of output GPIO
-  level changes (accurate to a few microseconds)
-* Software serial links, I2C, and SPI using any user GPIO
-* Rudimentary permission control through the socket and pipe interfaces so users
-  can be prevented from "updating" inappropriate GPIO
-* Creating and running scripts on the pigpio daemon
+---
 
-## Interfaces
+## Functionaliteit
+- Kruispunt met **twee richtingen (Noord–Zuid & Oost–West)**
+- Elke richting:
+  - Rood, geel en groen LED
+- **State machine** met veilige overgangen:
+  - Groen → Geel → All-Red → andere richting
+- **Night mode**:
+  - Beide richtingen knipperend geel
+  - Toggle via drukknop
+- Veilige opstart: all-red toestand
 
-The library provides a number of control interfaces
-* the C function interface,
-* the /dev/pigpio pipe interface,
-* the socket interface (used by the pigs utility and the Python module).
+---
 
-## Utilities
+## Hardware
+- Raspberry Pi 4
+- 6 × LED (rood, geel, groen × 2 richtingen)
+- 6 × weerstand (220–330 Ω)
+- 1 × drukknop (night mode)
+- Breadboard & jumper wires
 
-A number of utility programs are provided:
-* the pigpiod daemon,
-* the Python module,
-* the piscope digital waveform viewer,
-* the pigs command line utility,
-* the pig2vcd utility which converts notifications into the value change dump (VCD)
-  format (useful for viewing digital waveforms with GTKWave).
+### GPIO Mapping
+| Functie | GPIO |
+|------|------|
+| NS Rood | GPIO 26 |
+| NS Geel | GPIO 19 |
+| NS Groen | GPIO 13 |
+| EW Rood | GPIO 6 |
+| EW Geel | GPIO 5 |
+| EW Groen | GPIO 22 |
+| Night mode knop | GPIO 23 |
 
-## Documentation
+> De drukknop is aangesloten naar GND en gebruikt een interne pull-up.
 
-See http://abyz.me.uk/rpi/pigpio/
+---
 
-## Example programs
+## Software & Libraries
+- Programmeertaal: **C**
+- GPIO-library: **pigpio**
+- Besturingssysteem: Raspberry Pi OS (Linux)
 
-See http://abyz.me.uk/rpi/pigpio/examples.html
+> pigpio vereist directe toegang tot GPIO-hardware en draait daarom **op de Raspberry Pi zelf**.
 
-## GPIO
+---
 
-ALL GPIO are identified by their Broadcom number.  See http://elinux.org.
+## Build & Run
+### Compileren
+De code wordt gecompileerd met GCC.  
+pigpio is lokaal beschikbaar als statische library.
 
-There are 54 GPIO in total, arranged in two banks.
-
-Bank 1 contains GPIO 0-31.  Bank 2 contains GPIO 32-54.
-
-A user should only manipulate GPIO in bank 1.
-
-There are at least three types of board:
-* Type 1
-    * 26 pin header (P1)
-    * Hardware revision numbers of 2 and 3
-    * User GPIO 0-1, 4, 7-11, 14-15, 17-18, 21-25
-* Type 2
-    * 26 pin header (P1) and an additional 8 pin header (P5)
-    * Hardware revision numbers of 4, 5, 6, and 15
-    * User GPIO 2-4, 7-11, 14-15, 17-18, 22-25, 27-31
-* Type 3
-    * 40 pin expansion header (J8)
-    * Hardware revision numbers of 16 or greater
-    * User GPIO 2-27 (0 and 1 are reserved)
-
-It is safe to read all the GPIO. If you try to write a system GPIO or change
-its mode you can crash the Pi or corrupt the data on the SD card.
+```bash
+gcc src/intersection_night.c \
+  -I. -L. -lpigpio -lrt -lpthread \
+  -o intersection
