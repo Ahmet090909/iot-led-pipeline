@@ -3,27 +3,30 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdlib.h>
+
 #include "lib/cjson/cJSON.h"
 
+// Defaults (worden overschreven door config.json als die bestaat)
+static int NS_R = 26;
+static int NS_Y = 19;
+static int NS_G = 13;
 
-#define NS_R 26
-#define NS_Y 19
-#define NS_G 13
+static int EW_R = 6;
+static int EW_Y = 5;
+static int EW_G = 22;
 
-#define EW_R 6
-#define EW_Y 5
-#define EW_G 22
+static int BTN_NIGHT = 23; // drukknop naar GND
 
-#define BTN_NIGHT 23   // drukknop naar GND
+// Timings defaults (seconden)
+static int T_GREEN  = 5;
+static int T_YELLOW = 2;
+static int T_ALLRED = 1;
 
-// Timings (seconden) - demo waarden
-#define T_GREEN   5
-#define T_YELLOW  2
-#define T_ALLRED  1
+// Night mode default (ms)
+static int NIGHT_BLINK_MS = 500;
 
 static volatile int running = 1;
-
-// Night mode flag (toggle met knop)
 static volatile int night_mode = 0;
 
 // debounce
@@ -42,6 +45,73 @@ typedef enum {
 static void handle_sigint(int sig) {
     (void)sig;
     running = 0;
+}
+
+static char* read_file_all(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (len <= 0) { fclose(f); return NULL; }
+
+    char* data = (char*)malloc((size_t)len + 1);
+    if (!data) { fclose(f); return NULL; }
+
+    size_t n = fread(data, 1, (size_t)len, f);
+    fclose(f);
+    data[n] = '\0';
+    return data;
+}
+
+static int json_get_int(cJSON* obj, const char* key, int fallback) {
+    cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(v)) return v->valueint;
+    return fallback;
+}
+
+static void load_config(const char* path) {
+    char* text = read_file_all(path);
+    if (!text) {
+        // config.json ontbreekt -> defaults blijven
+        return;
+    }
+
+    cJSON* root = cJSON_Parse(text);
+    free(text);
+    if (!root) {
+        // JSON parse faalt -> defaults blijven
+        return;
+    }
+
+    cJSON* pins = cJSON_GetObjectItemCaseSensitive(root, "pins");
+    if (cJSON_IsObject(pins)) {
+        NS_R = json_get_int(pins, "ns_r", NS_R);
+        NS_Y = json_get_int(pins, "ns_y", NS_Y);
+        NS_G = json_get_int(pins, "ns_g", NS_G);
+
+        EW_R = json_get_int(pins, "ew_r", EW_R);
+        EW_Y = json_get_int(pins, "ew_y", EW_Y);
+        EW_G = json_get_int(pins, "ew_g", EW_G);
+
+        BTN_NIGHT = json_get_int(pins, "btn_night", BTN_NIGHT);
+    }
+
+    cJSON* timing = cJSON_GetObjectItemCaseSensitive(root, "timing_seconds");
+    if (cJSON_IsObject(timing)) {
+        T_GREEN  = json_get_int(timing, "green", T_GREEN);
+        T_YELLOW = json_get_int(timing, "yellow", T_YELLOW);
+        T_ALLRED = json_get_int(timing, "all_red", T_ALLRED);
+    }
+
+    cJSON* night = cJSON_GetObjectItemCaseSensitive(root, "night_mode");
+    if (cJSON_IsObject(night)) {
+        NIGHT_BLINK_MS = json_get_int(night, "blink_ms", NIGHT_BLINK_MS);
+    }
+
+    cJSON_Delete(root);
 }
 
 static void all_off(void) {
@@ -113,7 +183,6 @@ static state_t next_state(state_t s) {
 
 // Night mode: beide richtingen knipperend geel
 static void run_night_mode_loop(void) {
-    // In night mode: rood en groen uit, geel knippert
     all_off();
     set_ns(0,0,0);
     set_ew(0,0,0);
@@ -123,13 +192,16 @@ static void run_night_mode_loop(void) {
         on = !on;
         gpioWrite(NS_Y, on);
         gpioWrite(EW_Y, on);
-        // korte sleep met "snelle exit" check
-        for (int i = 0; i < 5 && running && night_mode; i++) {
-            usleep(100000); // 100ms -> totaal 500ms
+
+        // sleep in stukjes zodat je snel kan uitstappen
+        int chunks = NIGHT_BLINK_MS / 100;
+        if (chunks < 1) chunks = 1;
+
+        for (int i = 0; i < chunks && running && night_mode; i++) {
+            usleep(100000); // 100ms
         }
     }
 
-    // bij exit: alles uit + safe all-red kort
     all_off();
     set_ns(1,0,0);
     set_ew(1,0,0);
@@ -138,10 +210,8 @@ static void run_night_mode_loop(void) {
 
 static void btn_isr(int gpio, int level, uint32_t tick) {
     (void)gpio;
-    // we willen toggle op falling edge (druk)
-    if (level != 0) return;
+    if (level != 0) return; // toggle op falling edge
 
-    // debounce
     if ((tick - last_tick) < (DEBOUNCE_MS * 1000)) return;
     last_tick = tick;
 
@@ -150,6 +220,9 @@ static void btn_isr(int gpio, int level, uint32_t tick) {
 
 int main(void) {
     signal(SIGINT, handle_sigint);
+
+    // JSON config laden (blijft safe als file niet bestaat)
+    load_config("config.json");
 
     if (gpioInitialise() < 0) {
         fprintf(stderr, "pigpio init failed\n");
@@ -166,7 +239,7 @@ int main(void) {
 
     // button input
     gpioSetMode(BTN_NIGHT, PI_INPUT);
-    gpioSetPullUpDown(BTN_NIGHT, PI_PUD_UP); // knop naar GND
+    gpioSetPullUpDown(BTN_NIGHT, PI_PUD_UP);
     gpioSetAlertFunc(BTN_NIGHT, btn_isr);
 
     // start safe: all-red
@@ -180,7 +253,6 @@ int main(void) {
     while (running) {
         if (night_mode) {
             run_night_mode_loop();
-            // als night mode uit gaat, start veilig opnieuw
             s = S_NS_GREEN;
             continue;
         }
