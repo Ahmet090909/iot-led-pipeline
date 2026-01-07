@@ -3,6 +3,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include "lib/cjson/cJSON.h"
+
 
 #define NS_R 26
 #define NS_Y 19

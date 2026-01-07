@@ -1,0 +1,19 @@
+{
+  "pins": {
+    "ns_r": 26,
+    "ns_y": 19,
+    "ns_g": 13,
+    "ew_r": 6,
+    "ew_y": 5,
+    "ew_g": 22,
+    "btn_night": 23
+  },
+  "timing_seconds": {
+    "green": 5,
+    "yellow": 2,
+    "all_red": 1
+  },
+  "night_mode": {
+    "blink_ms": 500
+  }
+}
