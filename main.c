@@ -2,28 +2,30 @@
 #include <stdio.h>
 #include <signal.h>
 #include <unistd.h>
-#include <time.h>
 #include <stdlib.h>
 
 #include "lib/cjson/cJSON.h"
 
-// Defaults (worden overschreven door config.json als die bestaat)
+// Raspberry Pi 4 (BCM GPIO numbering)
+
+// NS RGB
 static int NS_R = 26;
-static int NS_Y = 19;
 static int NS_G = 13;
+static int NS_B = 19;   // not used (kept OFF)
 
+// EW RGB
 static int EW_R = 6;
-static int EW_Y = 5;
 static int EW_G = 22;
+static int EW_B = 5;    // not used (kept OFF)
 
-static int BTN_NIGHT = 23; // drukknop naar GND
+static int BTN_NIGHT = 23; // button to GND
 
-// Timings defaults (seconden)
+// Timings (seconds)
 static int T_GREEN  = 5;
 static int T_YELLOW = 2;
 static int T_ALLRED = 1;
 
-// Night mode default (ms)
+// Night mode blink (ms)
 static int NIGHT_BLINK_MS = 500;
 
 static volatile int running = 1;
@@ -46,6 +48,8 @@ static void handle_sigint(int sig) {
     (void)sig;
     running = 0;
 }
+
+/* ---------------- JSON (optional) ---------------- */
 
 static char* read_file_all(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -74,27 +78,21 @@ static int json_get_int(cJSON* obj, const char* key, int fallback) {
 
 static void load_config(const char* path) {
     char* text = read_file_all(path);
-    if (!text) {
-        // config.json ontbreekt -> defaults blijven
-        return;
-    }
+    if (!text) return;
 
     cJSON* root = cJSON_Parse(text);
     free(text);
-    if (!root) {
-        // JSON parse faalt -> defaults blijven
-        return;
-    }
+    if (!root) return;
 
     cJSON* pins = cJSON_GetObjectItemCaseSensitive(root, "pins");
     if (cJSON_IsObject(pins)) {
         NS_R = json_get_int(pins, "ns_r", NS_R);
-        NS_Y = json_get_int(pins, "ns_y", NS_Y);
         NS_G = json_get_int(pins, "ns_g", NS_G);
+        NS_B = json_get_int(pins, "ns_b", NS_B);
 
         EW_R = json_get_int(pins, "ew_r", EW_R);
-        EW_Y = json_get_int(pins, "ew_y", EW_Y);
         EW_G = json_get_int(pins, "ew_g", EW_G);
+        EW_B = json_get_int(pins, "ew_b", EW_B);
 
         BTN_NIGHT = json_get_int(pins, "btn_night", BTN_NIGHT);
     }
@@ -114,45 +112,47 @@ static void load_config(const char* path) {
     cJSON_Delete(root);
 }
 
+/* ---------------- LED helpers (common cathode: 1=ON) ---------------- */
+
 static void all_off(void) {
-    gpioWrite(NS_R, 0); gpioWrite(NS_Y, 0); gpioWrite(NS_G, 0);
-    gpioWrite(EW_R, 0); gpioWrite(EW_Y, 0); gpioWrite(EW_G, 0);
+    gpioWrite(NS_R, 0); gpioWrite(NS_G, 0); gpioWrite(NS_B, 0);
+    gpioWrite(EW_R, 0); gpioWrite(EW_G, 0); gpioWrite(EW_B, 0);
 }
 
-static void set_ns(int r, int y, int g) {
-    gpioWrite(NS_R, r); gpioWrite(NS_Y, y); gpioWrite(NS_G, g);
-}
+static void ns_red(void)    { gpioWrite(NS_R, 1); gpioWrite(NS_G, 0); gpioWrite(NS_B, 0); }
+static void ns_green(void)  { gpioWrite(NS_R, 0); gpioWrite(NS_G, 1); gpioWrite(NS_B, 0); }
+static void ns_yellow(void) { gpioWrite(NS_R, 1); gpioWrite(NS_G, 1); gpioWrite(NS_B, 0); } // R+G
 
-static void set_ew(int r, int y, int g) {
-    gpioWrite(EW_R, r); gpioWrite(EW_Y, y); gpioWrite(EW_G, g);
-}
+static void ew_red(void)    { gpioWrite(EW_R, 1); gpioWrite(EW_G, 0); gpioWrite(EW_B, 0); }
+static void ew_green(void)  { gpioWrite(EW_R, 0); gpioWrite(EW_G, 1); gpioWrite(EW_B, 0); }
+static void ew_yellow(void) { gpioWrite(EW_R, 1); gpioWrite(EW_G, 1); gpioWrite(EW_B, 0); } // R+G
 
 static void apply_state(state_t s) {
     all_off();
     switch (s) {
         case S_NS_GREEN:
-            set_ns(0,0,1);
-            set_ew(1,0,0);
+            ns_green();
+            ew_red();
             break;
         case S_NS_YELLOW:
-            set_ns(0,1,0);
-            set_ew(1,0,0);
+            ns_yellow();
+            ew_red();
             break;
         case S_ALLRED_1:
-            set_ns(1,0,0);
-            set_ew(1,0,0);
+            ns_red();
+            ew_red();
             break;
         case S_EW_GREEN:
-            set_ns(1,0,0);
-            set_ew(0,0,1);
+            ns_red();
+            ew_green();
             break;
         case S_EW_YELLOW:
-            set_ns(1,0,0);
-            set_ew(0,1,0);
+            ns_red();
+            ew_yellow();
             break;
         case S_ALLRED_2:
-            set_ns(1,0,0);
-            set_ew(1,0,0);
+            ns_red();
+            ew_red();
             break;
     }
 }
@@ -181,19 +181,22 @@ static state_t next_state(state_t s) {
     }
 }
 
-// Night mode: beide richtingen knipperend geel
+// Night mode: blink yellow both directions (R+G)
 static void run_night_mode_loop(void) {
     all_off();
-    set_ns(0,0,0);
-    set_ew(0,0,0);
-
     int on = 0;
+
     while (running && night_mode) {
         on = !on;
-        gpioWrite(NS_Y, on);
-        gpioWrite(EW_Y, on);
 
-        // sleep in stukjes zodat je snel kan uitstappen
+        gpioWrite(NS_R, on);
+        gpioWrite(NS_G, on);
+        gpioWrite(NS_B, 0);
+
+        gpioWrite(EW_R, on);
+        gpioWrite(EW_G, on);
+        gpioWrite(EW_B, 0);
+
         int chunks = NIGHT_BLINK_MS / 100;
         if (chunks < 1) chunks = 1;
 
@@ -203,14 +206,16 @@ static void run_night_mode_loop(void) {
     }
 
     all_off();
-    set_ns(1,0,0);
-    set_ew(1,0,0);
+    ns_red();
+    ew_red();
     sleep(1);
 }
 
+/* ---------------- Button ISR ---------------- */
+
 static void btn_isr(int gpio, int level, uint32_t tick) {
     (void)gpio;
-    if (level != 0) return; // toggle op falling edge
+    if (level != 0) return; // falling edge only (button to GND)
 
     if ((tick - last_tick) < (DEBOUNCE_MS * 1000)) return;
     last_tick = tick;
@@ -221,7 +226,7 @@ static void btn_isr(int gpio, int level, uint32_t tick) {
 int main(void) {
     signal(SIGINT, handle_sigint);
 
-    // JSON config laden (blijft safe als file niet bestaat)
+    // safe if config.json not present
     load_config("config.json");
 
     if (gpioInitialise() < 0) {
@@ -231,21 +236,22 @@ int main(void) {
 
     // outputs
     gpioSetMode(NS_R, PI_OUTPUT);
-    gpioSetMode(NS_Y, PI_OUTPUT);
     gpioSetMode(NS_G, PI_OUTPUT);
-    gpioSetMode(EW_R, PI_OUTPUT);
-    gpioSetMode(EW_Y, PI_OUTPUT);
-    gpioSetMode(EW_G, PI_OUTPUT);
+    gpioSetMode(NS_B, PI_OUTPUT);
 
-    // button input
+    gpioSetMode(EW_R, PI_OUTPUT);
+    gpioSetMode(EW_G, PI_OUTPUT);
+    gpioSetMode(EW_B, PI_OUTPUT);
+
+    // button input with internal pull-up
     gpioSetMode(BTN_NIGHT, PI_INPUT);
     gpioSetPullUpDown(BTN_NIGHT, PI_PUD_UP);
     gpioSetAlertFunc(BTN_NIGHT, btn_isr);
 
     // start safe: all-red
     all_off();
-    set_ns(1,0,0);
-    set_ew(1,0,0);
+    ns_red();
+    ew_red();
     sleep(1);
 
     state_t s = S_NS_GREEN;
